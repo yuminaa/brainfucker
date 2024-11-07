@@ -1,3 +1,6 @@
+// Part of Brainfucker JIT compiler.
+// Licensed under MIT license. See LICENSE file for details.
+
 .section __TEXT,__text
 .align 4
 
@@ -62,6 +65,8 @@ template_putchar:
     .long 0xD2800002      // mov x2, #1
     .long 0xD4000001      // svc #0
     .long 0xF84107E0      // ldr x0, [sp], #16
+
+// NOTE: Optimizable
 template_getchar:
     .long 0xF81F0FE0      // str x0, [sp, #-16]!
     .long 0xD2800008      // mov x8, #SYS_read
@@ -74,7 +79,7 @@ template_getchar:
 .section __BSS,__bss
 .align 4
 loop_stack:     .space 8000        // Space for 1000 nested loops
-loop_depth:     .space 8           // Current loop nesting level
+loop_depth:     .space 8           // Current nested loop level
 
 .section __TEXT,__text
 .globl _main
@@ -84,7 +89,7 @@ _main:
     stp     x29, x30, [sp, -16]!
     mov     x29, sp
 
-    // Check argument count
+    // Check args count
     cmp     x0, #2
     b.lt    Lusage_error
 
