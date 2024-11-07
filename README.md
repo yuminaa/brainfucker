@@ -17,4 +17,4 @@ While you're technically welcome to contribute, maybe consider using your talent
 Feel free to use this code as an example of what not to do. Please read [LICENSE](LICENSE) 
 
 -----
-<sub><sup>Made with love and questionable judgment</sup></sub>
+<sub>Made with love and questionable judgment</sub>
