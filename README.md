@@ -7,6 +7,10 @@ A slightly unhinged attempt at writing an interpreter for the Brainfuck language
 a lesson in hubris
 
 ## Requirement
+- Apple Silicon macOS 
+- XCode Assembler
+
+## Requirement
 > Apple Silicon macOS 
 > XCode Assembler
 
