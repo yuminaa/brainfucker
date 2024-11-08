@@ -1,8 +1,10 @@
-# compile.sh
+#!/bin/bash
 
 rm -rf bin
 rm -rf build
 mkdir bin
 mkdir build
-as -arch arm64 src/main.s -o bin/main.o
-ld main.o -o build/brainfucker -lSystem -syslibroot `xcrun -sdk macosx --show-sdk-path` -arch arm64
+as -o bin/main.o src/main.s
+ld -o build/brainfucker bin/main.o -lSystem -syslibroot `xcrun -sdk macosx --show-sdk-path` -e _main -arch arm64
+
+chmod +x build/brainfucker

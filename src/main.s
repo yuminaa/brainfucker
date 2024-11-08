@@ -1,455 +1,314 @@
-// Part of Brainfucker JIT compiler.
-// Licensed under MIT license. See LICENSE file for details.
-
-.section __TEXT,__text
-.align 4
-
-.extern _malloc
-.extern _free
-.extern _strlen
-.extern _pthread_jit_write_protect_np
-
-.set SYS_exit,      0x1
-.set SYS_read,      0x3
-.set SYS_write,     0x4
-.set SYS_open,      0x5
-.set SYS_close,     0x6
-.set SYS_mmap,      0xC5
-.set SYS_munmap,    0xC7
-.set SYS_mprotect,  0x4A
-.set SYS_lseek,     0x11
-
-.set PROT_READ,     0x1
-.set PROT_WRITE,    0x2
-.set PROT_EXEC,     0x4
-.set MAP_PRIVATE,   0x0002
-.set MAP_ANON,      0x1000
-.set MAP_JIT,       0x0800
-
-.set O_RDONLY,      0x0
-.set SEEK_SET,      0x0
-.set SEEK_END,      0x2
-
-.section __DATA,__const
-.align 4
-.const_code_size:       .long 1000000    // 1MB for JIT buffer
-.const_mem_size:        .long 30000      // 30KB for BF tape
-.const_ret_insn:        .long 0xD65F03C0 // RET instruction
-.const_ldrb_insn:       .long 0x39400001 // LDRB W1, [X0]
-.const_cbnz_insn:       .long 0x35000000 // CBNZ base instruction
-.const_b_insn:          .long 0x54000000 // B base instruction
-
-.section __DATA,__data
-.align 4
-err_usage:      .ascii  "Usage: ./bf <input_file>\n\0"
-err_alloc:      .ascii  "Memory allocation failed\n\0"
-err_file:       .ascii  "File operation failed\n\0"
-err_compile:    .ascii  "Compilation failed\n\0"
-
-.align 4
-template_inc_ptr:   .long 0x91000400      // add x0, x0, #1
-template_dec_ptr:   .long 0xD1000400      // sub x0, x0, #1
-template_inc_val:
-    .long 0x39400001      // ldrb w1, [x0]
-    .long 0x11000421      // add w1, w1, #1
-    .long 0x39000001      // strb w1, [x0]
-template_dec_val:
-    .long 0x39400001      // ldrb w1, [x0]
-    .long 0x51000421      // sub w1, w1, #1
-    .long 0x39000001      // strb w1, [x0]
-template_putchar:
-    .long 0xF81F0FE0      // str x0, [sp, #-16]!
-    .long 0xD2800008      // mov x8, #SYS_write
-    .long 0xD2800001      // mov x0, #1
-    .long 0xAA0003E1      // mov x1, x0
-    .long 0xD2800002      // mov x2, #1
-    .long 0xD4000001      // svc #0
-    .long 0xF84107E0      // ldr x0, [sp], #16
-
-// NOTE: Optimizable
-template_getchar:
-    .long 0xF81F0FE0      // str x0, [sp, #-16]!
-    .long 0xD2800008      // mov x8, #SYS_read
-    .long 0xD2800000      // mov x0, #0
-    .long 0xAA0003E1      // mov x1, x0
-    .long 0xD2800002      // mov x2, #1
-    .long 0xD4000001      // svc #0
-    .long 0xF84107E0      // ldr x0, [sp], #16
-
-.section __BSS,__bss
-.align 4
-loop_stack:     .space 8000        // Space for 1000 nested loops
-loop_depth:     .space 8           // Current nested loop level
-
 .section __TEXT,__text
 .globl _main
 .align 2
 
+.section __TEXT,__const
+syscall_mmap:     .quad 0x20000c5
+syscall_munmap:   .quad 0x2000049
+syscall_mprotect: .quad 0x200004a
+bf_memsize:       .quad 30000
+page_size:        .quad 4096
+jit_size:         .quad 8192     // Increased JIT size
+guard_pages_size: .quad 8192     // 2 * 4096
+
+// Debug messages
+.section __TEXT,__cstring
+debug_jit_alloc:  .asciz "Attempting JIT allocation...\n"
+debug_jit_fail:   .asciz "JIT allocation failed. errno: %d\n"
+debug_bf_alloc:   .asciz "Attempting BF memory allocation...\n"
+error_msg_alloc:  .asciz "Memory allocation failed\n"
+error_msg_bounds: .asciz "Buffer bounds exceeded\n"
+error_msg_invalid: .asciz "Invalid program instruction\n"
+test_program:     .asciz "++."
+
+.section __TEXT,__const
+jit_prologue:
+    .long   0xA9BF2FEA     // stp x10, x11, [sp, #-16]!
+    .long   0xA9BF27E8     // stp x8, x9, [sp, #-16]!
+    .long   0xD2800008     // mov x8, #0
+
+jit_increment:
+    .long   0x38686D4A     // ldrb w10, [x9, x8]
+    .long   0x11000550     // add w10, w10, #1
+    .long   0x38286D4A     // strb w10, [x9, x8]
+
+jit_decrement:
+    .long   0x38686D4A     // ldrb w10, [x9, x8]
+    .long   0x51000550     // sub w10, w10, #1
+    .long   0x38286D4A     // strb w10, [x9, x8]
+
+jit_move_right:
+    .long   0x91000508     // add x8, x8, #1
+    .long   0xF1007D08     // cmp x8, #30000-1
+    .long   0x54000082     // b.cs bounds_error_handler
+
+jit_move_left:
+    .long   0xF100050F     // cmp x8, #0
+    .long   0x54000064     // b.ls bounds_error_handler
+    .long   0xD1000508     // sub x8, x8, #1
+
+jit_output:
+    .long   0xD2800020     // mov x0, #1 (stdout)
+    .long   0x8B080121     // add x1, x9, x8
+    .long   0xD2800001     // mov x0, #0
+    .long   0xD2800021     // mov x1, #1
+    .long   0xD2800210     // mov x16, #16 (write syscall)
+    .long   0xD4001001     // svc #0x80
+
+jit_epilogue:
+    .long   0xA8C127E8     // ldp x8, x9, [sp], #16
+    .long   0xA8C12FEA     // ldp x10, x11, [sp], #16
+    .long   0xD65F03C0     // ret
+
+.section __TEXT,__text
 _main:
-    stp     x29, x30, [sp, -16]!
+    stp     x29, x30, [sp, #-16]!
     mov     x29, sp
+    stp     x19, x20, [sp, #-16]!
+    stp     x21, x22, [sp, #-16]!
+    stp     x23, x24, [sp, #-16]!
+    stp     x25, x26, [sp, #-16]!
 
-    // Check args count
-    cmp     x0, #2
-    b.lt    Lusage_error
+    // Print debug message before JIT allocation
+    adrp    x0, debug_jit_alloc@PAGE
+    add     x0, x0, debug_jit_alloc@PAGEOFF
+    bl      _printf
 
-    // Save input file path
-    ldr     x19, [x1, #8]        // argv[1]
+    // Load JIT size and align to page boundary
+    adrp    x26, jit_size@PAGE
+    ldr     x26, [x26, jit_size@PAGEOFF]
+    add     x26, x26, #4095        // Round up to next page
+    and     x26, x26, #~4095       // Align to page boundary
 
-    // Enable JIT permissions
-    mov     x0, #1
-    bl      _pthread_jit_write_protect_np
+    // Attempt JIT allocation
+    mov     x0, #0                  // addr = NULL
+    mov     x1, x26                // size
+    mov     x2, #0x3               // PROT_READ | PROT_WRITE
+    mov     x3, #0x1012            // MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT (0x1000 | 0x0002 | 0x0010)
+    mov     x4, #-1                // fd
+    mov     x5, #0                 // offset
+    
+    // Properly load the syscall number using adrp/ldr
+    adrp    x16, syscall_mmap@PAGE
+    ldr     x16, [x16, syscall_mmap@PAGEOFF]
+    svc     #0x80
 
-    // Allocate executable memory for JIT buffer
-    mov     x0, #0               // addr hint
-    adrp    x1, .const_code_size@PAGE
-    add     x1, x1, .const_code_size@PAGEOFF
-    ldr     w1, [x1]
-    mov     x2, #(PROT_READ | PROT_WRITE | PROT_EXEC)
-    mov     x3, #(MAP_PRIVATE | MAP_ANON | MAP_JIT)
-    mov     x4, #-1              // fd
-    mov     x5, #0               // offset
-    mov     x16, #SYS_mmap
-    svc     #0
+    // Check allocation result
+    cmn     x0, #0
+    b.cs    1f
 
-    // Check allocation success
-    cmn     x0, #1
-    b.eq    Lalloc_error
+    // Print error if allocation failed
+    mov     x1, x0                 // Save error code
+    adrp    x0, debug_jit_fail@PAGE
+    add     x0, x0, debug_jit_fail@PAGEOFF
+    bl      _printf
+    b       alloc_error
 
-    // Save code buffer address
-    mov     x20, x0              // x20 = code buffer
+1:  // JIT allocation succeeded
+    mov     x20, x0                // Save JIT buffer address
+    mov     x21, x0                // Current JIT position
 
-    // Allocate BF tape memory
-    mov     x0, #0
-    adrp    x1, .const_mem_size@PAGE
-    add     x1, x1, .const_mem_size@PAGEOFF
-    ldr     w1, [x1]
-    mov     x2, #(PROT_READ | PROT_WRITE)
-    mov     x3, #(MAP_PRIVATE | MAP_ANON)
-    mov     x4, #-1
-    mov     x5, #0
-    mov     x16, #SYS_mmap
-    svc     #0
+    // Print debug message before BF memory allocation
+    adrp    x0, debug_bf_alloc@PAGE
+    add     x0, x0, debug_bf_alloc@PAGEOFF
+    bl      _printf
 
-    // Check allocation
-    cmn     x0, #1
-    b.eq    Lalloc_error
+    // Load constants for BF memory
+    adrp    x25, bf_memsize@PAGE
+    ldr     x25, [x25, bf_memsize@PAGEOFF]
+    adrp    x24, guard_pages_size@PAGE
+    ldr     x24, [x24, guard_pages_size@PAGEOFF]
+    adrp    x23, page_size@PAGE
+    ldr     x23, [x23, page_size@PAGEOFF]
 
-    // Save tape memory address
-    mov     x21, x0              // x21 = tape memory
+    // Allocate BF memory
+    mov     x0, #0                  // addr = NULL
+    add     x1, x25, x24           // size = BF memory + guard pages
+    mov     x2, #0x3               // PROT_READ | PROT_WRITE
+    mov     x3, #0x1002            // MAP_PRIVATE | MAP_ANONYMOUS
+    mov     x4, #-1                // fd
+    mov     x5, #0                 // offset
+    adrp    x16, syscall_mmap@PAGE
+    ldr     x16, [x16, syscall_mmap@PAGEOFF]
+    svc     #0x80
 
-    // Read input file
-    mov     x0, x19             // filename
-    bl      read_file
+    // Check BF memory allocation
+    cmn     x0, #0
+    b.cs    1f
+    b       alloc_error
 
-    // Check file read success
-    cbz     x0, Lfile_error
+1:  mov     x19, x0                // Save base address
+    add     x19, x19, x23          // Skip first guard page
 
-    // Save input buffer and size
-    mov     x19, x0             // x19 = input buffer
-    mov     x22, x1             // x22 = input size
-
-    // Compile BF code
-    mov     x0, x19             // source
-    mov     x1, x22             // length
-    mov     x2, x20             // code buffer
-    mov     x3, x21             // tape memory
-    bl      compile_bf
-
-    // Check compilation success
-    cbz     x0, Lcompile_error
-
-    // Execute generated code
-    blr     x0                  // Call generated code
-
-    // Cleanup and exit
-    mov     x0, x20
-    adrp    x1, .const_code_size@PAGE
-    add     x1, x1, .const_code_size@PAGEOFF
-    ldr     w1, [x1]
-    mov     x16, #SYS_munmap
-    svc     #0
-
-    mov     x0, x21
-    adrp    x1, .const_mem_size@PAGE
-    add     x1, x1, .const_mem_size@PAGEOFF
-    ldr     w1, [x1]
-    mov     x16, #SYS_munmap
-    svc     #0
-
+    // Protect first guard page
     mov     x0, x19
-    bl      _free
+    sub     x0, x0, x23           // Go back to guard page
+    mov     x1, x23               // page size
+    mov     x2, #0                // PROT_NONE
+    adrp    x16, syscall_mprotect@PAGE
+    ldr     x16, [x16, syscall_mprotect@PAGEOFF]
+    svc     #0x80
 
-    mov     w0, #0
-    ldp     x29, x30, [sp], #16
-    ret
+    // Protect second guard page
+    add     x0, x19, x25          // End of BF memory
+    mov     x1, x23               // page size
+    mov     x2, #0                // PROT_NONE
+    adrp    x16, syscall_mprotect@PAGE
+    ldr     x16, [x16, syscall_mprotect@PAGEOFF]
+    svc     #0x80
 
-Lusage_error:
-    adrp    x0, err_usage@PAGE
-    add     x0, x0, err_usage@PAGEOFF
-    bl      print_error
-    mov     w0, #1
-    ldp     x29, x30, [sp], #16
-    ret
+    // Load program address
+    adrp    x22, test_program@PAGE
+    add     x22, x22, test_program@PAGEOFF
 
-Lalloc_error:
-    adrp    x0, err_alloc@PAGE
-    add     x0, x0, err_alloc@PAGEOFF
-    bl      print_error
-    mov     w0, #1
-    ldp     x29, x30, [sp], #16
-    ret
+    // Copy prologue
+    adrp    x0, jit_prologue@PAGE
+    add     x0, x0, jit_prologue@PAGEOFF
+    bl      copy_with_bounds_check
 
-Lfile_error:
-    adrp    x0, err_file@PAGE
-    add     x0, x0, err_file@PAGEOFF
-    bl      print_error
-    mov     w0, #1
-    ldp     x29, x30, [sp], #16
-    ret
+compile_loop:
+    ldrb    w23, [x22], #1       // Load next instruction
+    cbz     w23, compile_done
 
-Lcompile_error:
-    adrp    x0, err_compile@PAGE
-    add     x0, x0, err_compile@PAGEOFF
-    bl      print_error
-    mov     w0, #1
-    ldp     x29, x30, [sp], #16
-    ret
+    // Validate instruction
+    cmp     w23, #'+'
+    b.eq    gen_increment
+    cmp     w23, #'-'
+    b.eq    gen_decrement
+    cmp     w23, #'>'
+    b.eq    gen_move_right
+    cmp     w23, #'<'
+    b.eq    gen_move_left
+    cmp     w23, #'.'
+    b.eq    gen_output
+    b       invalid_instruction
 
-// Function to compile BF code
-compile_bf:
-    stp     x29, x30, [sp, -16]!
+gen_increment:
+    adrp    x0, jit_increment@PAGE
+    add     x0, x0, jit_increment@PAGEOFF
+    bl      copy_with_bounds_check
+    b       compile_loop
+
+gen_decrement:
+    adrp    x0, jit_decrement@PAGE
+    add     x0, x0, jit_decrement@PAGEOFF
+    bl      copy_with_bounds_check
+    b       compile_loop
+
+gen_move_right:
+    adrp    x0, jit_move_right@PAGE
+    add     x0, x0, jit_move_right@PAGEOFF
+    bl      copy_with_bounds_check
+    b       compile_loop
+
+gen_move_left:
+    adrp    x0, jit_move_left@PAGE
+    add     x0, x0, jit_move_left@PAGEOFF
+    bl      copy_with_bounds_check
+    b       compile_loop
+
+gen_output:
+    adrp    x0, jit_output@PAGE
+    add     x0, x0, jit_output@PAGEOFF
+    bl      copy_with_bounds_check
+    b       compile_loop
+
+compile_done:
+    // Copy epilogue
+    adrp    x0, jit_epilogue@PAGE
+    add     x0, x0, jit_epilogue@PAGEOFF
+    bl      copy_with_bounds_check
+
+    // Make JIT memory executable
+    mov     x0, x20               // JIT buffer address
+    mov     x1, x26               // JIT buffer size
+    mov     x2, #0x5              // PROT_READ | PROT_EXEC
+    adrp    x16, syscall_mprotect@PAGE
+    ldr     x16, [x16, syscall_mprotect@PAGEOFF]
+    svc     #0x80
+
+    cmn     x0, #0
+    b.cs    1f
+    b       protection_error
+1:
+    // Execute generated code
+    mov     x9, x19               // Set BF memory pointer
+    blr     x20                   // Call generated code
+
+    b       cleanup
+
+copy_with_bounds_check:
+    stp     x29, x30, [sp, #-16]!
     mov     x29, sp
-    stp     x19, x20, [sp, -16]!
-    stp     x21, x22, [sp, -16]!
 
-    mov     x19, x0              // Save source
-    mov     x20, x1              // Save length
-    mov     x21, x2              // Save code buffer
-    mov     x22, x3              // Save tape memory
+    // Check bounds
+    sub     x1, x21, x20
+    add     x1, x1, #16
+    cmp     x1, x26               // Compare with JIT buffer size
+    b.ge    buffer_overflow
 
-    // Generate prologue - mov x0, tape_memory
-    mov     x0, x22
-    str     x0, [x21], #8
+    // Copy instructions
+    ldp     x1, x2, [x0], #16
+    stp     x1, x2, [x21], #16
 
-Lcompile_loop:
-    cbz     x20, Lcompile_done   // Check if we're done
+    ldp     x29, x30, [sp], #16
+    ret
 
-    ldrb    w0, [x19], #1        // Load next character
-    sub     x20, x20, #1         // Decrement length
+bounds_error_handler:
+    adrp    x0, error_msg_bounds@PAGE
+    add     x0, x0, error_msg_bounds@PAGEOFF
+    bl      _puts
+    mov     w0, #1
+    b       cleanup
 
-    // Switch on character
-    cmp     w0, #'>'
-    b.eq    Ldo_inc_ptr
-    cmp     w0, #'<'
-    b.eq    Ldo_dec_ptr
-    cmp     w0, #'+'
-    b.eq    Ldo_inc_val
-    cmp     w0, #'-'
-    b.eq    Ldo_dec_val
-    cmp     w0, #'.'
-    b.eq    Ldo_putchar
-    cmp     w0, #','
-    b.eq    Ldo_getchar
-    cmp     w0, #'['
-    b.eq    Ldo_loop_start
-    cmp     w0, #']'
-    b.eq    Ldo_loop_end
+alloc_error:
+    adrp    x0, error_msg_alloc@PAGE
+    add     x0, x0, error_msg_alloc@PAGEOFF
+    bl      _puts
+    mov     w0, #1
+    b       exit
 
-    b       Lcompile_loop
+buffer_overflow:
+    adrp    x0, error_msg_bounds@PAGE
+    add     x0, x0, error_msg_bounds@PAGEOFF
+    bl      _puts
+    mov     w0, #1
+    b       exit
 
-Lcompile_done:
-    // Generate epilogue - ret
-    adrp    x0, .const_ret_insn@PAGE
-    add     x0, x0, .const_ret_insn@PAGEOFF
-    ldr     w0, [x0]
-    str     w0, [x21], #4
+invalid_instruction:
+    adrp    x0, error_msg_invalid@PAGE
+    add     x0, x0, error_msg_invalid@PAGEOFF
+    bl      _puts
+    mov     w0, #1
+    b       exit
 
-    mov     x0, x21              // Return code buffer
+protection_error:
+    mov     w0, #1
+    b       exit
+
+cleanup:
+    // Unmap JIT memory
+    mov     x0, x20               // JIT buffer address
+    mov     x1, x26               // JIT buffer size
+    adrp    x16, syscall_munmap@PAGE
+    ldr     x16, [x16, syscall_munmap@PAGEOFF]
+    svc     #0x80
+
+    // Unmap all BF memory (including guard pages)
+    mov     x0, x19
+    sub     x0, x0, x23          // Start from first guard page
+    add     x1, x25, x24         // Total size (BF memory + guard pages)
+    adrp    x16, syscall_munmap@PAGE
+    ldr     x16, [x16, syscall_munmap@PAGEOFF]
+    svc     #0x80
+
+    mov     w0, #0               // Success status
+
+exit:
+    // Restore registers
+    ldp     x25, x26, [sp], #16
+    ldp     x23, x24, [sp], #16
     ldp     x21, x22, [sp], #16
     ldp     x19, x20, [sp], #16
     ldp     x29, x30, [sp], #16
     ret
-
-Ldo_inc_ptr:
-    adrp    x0, template_inc_ptr@PAGE
-    add     x0, x0, template_inc_ptr@PAGEOFF
-    ldr     w0, [x0]
-    str     w0, [x21], #4
-    b       Lcompile_loop
-
-Ldo_dec_ptr:
-    adrp    x0, template_dec_ptr@PAGE
-    add     x0, x0, template_dec_ptr@PAGEOFF
-    ldr     w0, [x0]
-    str     w0, [x21], #4
-    b       Lcompile_loop
-
-Ldo_inc_val:
-    adrp    x0, template_inc_val@PAGE
-    add     x0, x0, template_inc_val@PAGEOFF
-    ldp     q0, q1, [x0]
-    stp     q0, q1, [x21], #32
-    b       Lcompile_loop
-
-Ldo_dec_val:
-    adrp    x0, template_dec_val@PAGE
-    add     x0, x0, template_dec_val@PAGEOFF
-    ldp     q0, q1, [x0]
-    stp     q0, q1, [x21], #32
-    b       Lcompile_loop
-
-Ldo_putchar:
-    adrp    x0, template_putchar@PAGE
-    add     x0, x0, template_putchar@PAGEOFF
-    mov     x2, #28              // Template size
-Lcopy_putchar:
-    ldr     w1, [x0], #4
-    str     w1, [x21], #4
-    subs    x2, x2, #4
-    b.ne    Lcopy_putchar
-    b       Lcompile_loop
-
-Ldo_getchar:
-    adrp    x0, template_getchar@PAGE
-    add     x0, x0, template_getchar@PAGEOFF
-    mov     x2, #28              // Template size
-Lcopy_getchar:
-    ldr     w1, [x0], #4
-    str     w1, [x21], #4
-    subs    x2, x2, #4
-    b.ne    Lcopy_getchar
-    b       Lcompile_loop
-
-Ldo_loop_start:
-    // Save current position
-    adrp    x0, loop_depth@PAGE
-    add     x0, x0, loop_depth@PAGEOFF
-    ldr     x1, [x0]
-    adrp    x2, loop_stack@PAGE
-    add     x2, x2, loop_stack@PAGEOFF
-    str     x21, [x2, x1, lsl #3]
-    add     x1, x1, #1
-    str     x1, [x0]
-
-    // Generate conditional branch
-    adrp    x0, .const_ldrb_insn@PAGE
-    add     x0, x0, .const_ldrb_insn@PAGEOFF
-    ldr     w0, [x0]
-    str     w0, [x21], #4
-    adrp    x0, .const_cbnz_insn@PAGE
-    add     x0, x0, .const_cbnz_insn@PAGEOFF
-    ldr     w0, [x0]
-    str     w0, [x21], #4
-    b       Lcompile_loop
-
-Ldo_loop_end:
-    // Get matching loop start
-    adrp    x0, loop_depth@PAGE
-    add     x0, x0, loop_depth@PAGEOFF
-    ldr     x1, [x0]
-    sub     x1, x1, #1
-    str     x1, [x0]
-    adrp    x2, loop_stack@PAGE
-    add     x2, x2, loop_stack@PAGEOFF
-    ldr     x1, [x2, x1, lsl #3]
-
-    // Calculate and patch forward branch
-    sub     x2, x21, x1
-    lsr     x2, x2, #2
-    adrp    x0, .const_cbnz_insn@PAGE
-    add     x0, x0, .const_cbnz_insn@PAGEOFF
-    ldr     w0, [x0]
-    orr     w0, w0, w2           // Add offset to instruction
-    str     w0, [x1]
-
-    // Generate backward branch
-    adrp    x0, .const_ldrb_insn@PAGE
-    add     x0, x0, .const_ldrb_insn@PAGEOFF
-    ldr     w0, [x0]
-    str     w0, [x21], #4
-    sub     x2, x1, x21
-    lsr     x2, x2, #2
-    adrp    x0, .const_b_insn@PAGE
-    add     x0, x0, .const_b_insn@PAGEOFF
-    ldr     w0, [x0]
-    orr     w0, w0, w2           // Add offset to instruction
-    str     w0, [x21], #4
-    b       Lcompile_loop
-
-read_file:
-    stp     x29, x30, [sp, -16]!
-    mov     x29, sp
-
-    // Open file
-    mov     w1, O_RDONLY
-    mov     x16, #SYS_open
-    svc     #0
-
-    // Check for error
-    cmn     x0, #1
-    b.eq    Lread_error
-
-    mov     x19, x0              // Save fd
-
-    // Get file size
-    mov     x0, x19
-    mov     x1, #0
-    mov     x2, SEEK_END
-    mov     x16, #SYS_lseek
-    svc     #0
-
-    mov     x20, x0              // Save file size
-
-    // Reset to start
-    mov     x0, x19
-    mov     x1, #0
-    mov     x2, SEEK_SET
-    mov     x16, #SYS_lseek
-    svc     #0
-
-    // Allocate buffer
-    mov     x0, x20
-    bl      _malloc
-    cbz     x0, Lread_error
-
-    mov     x21, x0              // Save buffer address
-
-    // Read file
-    mov     x0, x19
-    mov     x1, x21
-    mov     x2, x20
-    mov     x16, #SYS_read
-    svc     #0
-
-    // Close file
-    mov     x0, x19
-    mov     x16, #SYS_close
-    svc     #0
-
-    mov     x0, x21              // Return buffer
-    mov     x1, x20              // Return size
-    ldp     x29, x30, [sp], #16
-    ret
-
-Lread_error:
-    mov     x0, #0
-    ldp     x29, x30, [sp], #16
-    ret
-
-print_error:
-    stp     x29, x30, [sp, -16]!
-    mov     x29, sp
-
-    bl      _strlen
-
-    mov     x2, x0               // Length
-    mov     x1, x0               // String
-    mov     x0, #2               // stderr
-    mov     x16, #SYS_write
-    svc     #0
-
-    ldp     x29, x30, [sp], #16
-    ret
-
-.subsections_via_symbols

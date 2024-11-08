@@ -1,0 +1,1 @@
+lldb ./build/brainfucker tests/add.bf
