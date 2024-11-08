@@ -10,10 +10,6 @@ a lesson in hubris
 - Apple Silicon macOS 
 - XCode Assembler
 
-## Requirement
-> Apple Silicon macOS 
-> XCode Assembler
-
 ## Building
 
 1. Clone the repository: `git clone https://github.com/your-repo/brainfucker.git && cd Brainfucker`
