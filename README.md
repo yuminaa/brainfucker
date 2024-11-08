@@ -1,12 +1,15 @@
 # Brainfucker
 
-A slightly unhinged attempt at writing a JIT compiler for the Brainfuck language in ARM64 assembly, because why not?
-
-> [!IMPORTANT] 
-> This compiler is currently about as functional as a chocolate teapot. It's written in ARM64 assembly because apparently, I enjoy pain and suffering.
+A slightly unhinged attempt at writing an interpreter for the Brainfuck language in ARM64 assembly, because why not?.
 
 > [!WARNING]
-> This compiler is not usable in its current state because I keep getting segfaults.
+> This compiler is not usable in its current state because I keep getting segfaults.Consider it a work-in-progress—or 
+a lesson in hubris
+
+## Building
+
+1. Clone the repository: `git clone https://github.com/your-repo/brainfucker.git && cd Brainfucker`
+2. Run `make`
 
 ## Contributing
 
@@ -17,4 +20,4 @@ While you're technically welcome to contribute, maybe consider using your talent
 Feel free to use this code as an example of what not to do. Please read [LICENSE](LICENSE) 
 
 -----
-<sub>Made with love and questionable judgment</sub>
+<sub>Made with love</sub>

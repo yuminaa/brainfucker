@@ -1,119 +1,195 @@
-; Memory-safe Brainfuck JIT compiler for ARM64
-; Register allocation:
-; x0: Base pointer to memory array (preserved)
-; x1: Current data pointer
-; x2: Temporary for bounds checking
-; x3: Temporary for value operations
-; x4: Loop counter/temporary
-; x29: Frame pointer
-; x30: Link register
+// This is an ARM64 assembly implementation of a Brainfuck interpreter.
+// The program reads a Brainfuck program from the `test_program` label and executes it.
+// It uses mmap to allocate a memory tape of 30,000 bytes and interprets the Brainfuck instructions.
 
+// Global symbols
 .global _main
 .align 4
 
+// Brainfuck program to be interpreted
+test_program:
+    .ascii  "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++."
+    .byte   0
+
+.align 4
 _main:
-    ; Prologue - Setup stack frame
-    stp     x29, x30, [sp, #-16]!    ; Save frame pointer and link register
-    mov     x29, sp                   ; Set up frame pointer
+    // Save frame pointer and link register
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
 
-    ; Initialize memory array
-    ; Allocate memory: mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-    mov     x0, #0                    ; addr = NULL
-    mov     x1, #30000               ; We'll handle this large value properly
-    movk    x1, #0, lsl #16          ; Clear upper bits
-    mov     x2, #3                    ; PROT_READ | PROT_WRITE
-    mov     x3, #0x22                 ; MAP_PRIVATE | MAP_ANONYMOUS
-    mov     x4, #-1                   ; fd = -1
-    mov     x5, #0                    ; offset = 0
-    mov     x8, #222                  ; sys_mmap
-    svc     #0                        ; System call
+    // mmap syscall to allocate memory for the tape
+    mov     x0, #0                     // addr = NULL (system chooses address)
+    mov     x1, #0x7530                // tape size = 30,000 bytes
+    mov     x2, #3                     // PROT_READ | PROT_WRITE
+    mov     x3, #0x1002                // MAP_PRIVATE | MAP_ANONYMOUS
+    mov     x4, #-1                    // fd = -1 (not using a file)
+    mov     x5, #0                     // offset = 0
+    mov     x16, #197                  // macOS mmap syscall
+    svc     #0x80                      // Perform mmap syscall
 
-    ; Check if memory allocation failed
-    cmp     x0, #0
-    b.lt    error_handler
+    // Check if mmap failed
+    cbz     x0, error_handler
 
-    ; Initialize data pointer
-    mov     x1, x0                    ; x1 = current data pointer = start of memory
+    // Initialize pointers
+    mov     x19, x0                    // x19 = Base pointer
+    mov     x20, x0                    // x20 = Current pointer
+    mov     x21, #0x7000               // Load the high part
+    add     x21, x21, #0x530           // Add the low part
+    add     x21, x21, x19              // Add base pointer (x19)
+    adr     x22, test_program          // x22 = Instruction pointer
 
-    ; Memory safety bounds - using multiple instructions for large value
-    mov     x2, #30000               ; Load lower 16 bits
-    movk    x2, #0, lsl #16          ; Clear upper bits
-    add     x2, x2, x0               ; x2 = base + 30000 (end of memory boundary)
+interpret_loop:
+    // Load instruction and check for end of program
+    ldrb    w23, [x22]
+    cbz     w23, cleanup
 
-    ; Example of increment operation ([>])
-increment_op:
-    ; Check bounds before incrementing pointer
-    add     x3, x1, #1               ; Calculate new pointer position
-    cmp     x3, x2                   ; Compare with end boundary
-    b.ge    error_handler            ; Branch if would exceed boundary
-    
-    ; Safe to increment
-    ldrb    w4, [x1]                 ; Load current byte
-    add     w4, w4, #1               ; Increment value
-    strb    w4, [x1]                 ; Store back to memory
+    // Brainfuck instruction handling
+    cmp     w23, #'+'
+    b.eq    increment
+    cmp     w23, #'-'
+    b.eq    decrement
+    cmp     w23, #'>'
+    b.eq    move_right
+    cmp     w23, #'<'
+    b.eq    move_left
+    cmp     w23, #'.'
+    b.eq    output
+    cmp     w23, #','
+    b.eq    input
+    cmp     w23, #'['
+    b.eq    loop_start
+    cmp     w23, #']'
+    b.eq    loop_end
 
-decrement_op:
-    ; Check bounds before decrementing pointer
-    cmp     x1, x0                   ; Compare with start boundary
-    b.lt    error_handler            ; Branch if would exceed boundary
-    
-    ; Safe to decrement
-    ldrb    w4, [x1]                 ; Load current byte
-    sub     w4, w4, #1               ; Decrement value
-    strb    w4, [x1]                 ; Store back to memory
+    // Skip invalid instructions
+    add     x22, x22, #1
+    b       interpret_loop
+
+increment:
+    // Increment the value at the current cell
+    ldrb    w24, [x20]
+    add     w24, w24, #1
+    strb    w24, [x20]
+    b       advance
+
+decrement:
+    // Decrement the value at the current cell
+    ldrb    w24, [x20]
+    sub     w24, w24, #1
+    strb    w24, [x20]
+    b       advance
 
 move_right:
-    ; Bounds check for pointer movement
-    add     x3, x1, #1               ; Calculate new pointer position
-    cmp     x3, x2                   ; Compare with end boundary
-    b.ge    error_handler            ; Branch if would exceed boundary
-    
-    add     x1, x1, #1               ; Move pointer right
+    // Move the pointer to the right
+    add     x20, x20, #1
+    cmp     x20, x21
+    b.ge    error_handler
+    b       advance
 
 move_left:
-    ; Bounds check for pointer movement
-    sub     x3, x1, #1               ; Calculate new pointer position
-    cmp     x3, x0                   ; Compare with start boundary
-    b.lt    error_handler            ; Branch if would exceed boundary
-    
-    sub     x1, x1, #1               ; Move pointer left
+    // Move the pointer to the left
+    sub     x20, x20, #1
+    cmp     x20, x19
+    b.lt    error_handler
+    b       advance
 
-output_byte:
-    ; Output current byte (.)
-    mov     x0, #1                   ; fd = 1 (stdout)
-    mov     x2, #1                   ; length = 1 byte
-    mov     x8, #64                  ; sys_write
-    svc     #0
+output:
+    // Output the value at the current cell
+    mov     x0, #1                     // stdout
+    mov     x1, x20                    // current cell
+    mov     x2, #1                     // length
+    mov     x16, #4                    // write syscall
+    svc     #0x80
+    b       advance
 
-input_byte:
-    ; Input byte (,)
-    mov     x0, #0                   ; fd = 0 (stdin)
-    mov     x2, #1                   ; length = 1 byte
-    mov     x8, #63                  ; sys_read
-    svc     #0
+input:
+    // Input a value into the current cell
+    mov     x0, #0                     // stdin
+    mov     x1, x20
+    mov     x2, #1
+    mov     x16, #3                    // read syscall
+    svc     #0x80
+    b       advance
 
-error_handler:
-    ; Handle error conditions
-    mov     x0, #1                   ; Exit code 1
-    mov     x8, #93                  ; sys_exit
-    svc     #0
-
-exit:
-    ; Clean exit
-    mov     x0, #0                   ; Exit code 0
-    mov     x8, #93                  ; sys_exit
-    svc     #0
-
-; Loop implementation
 loop_start:
-    ; Stack management for loops
-    stp     x4, x30, [sp, #-16]!    ; Save loop counter and return address
-    
-    ; Check current cell
-    ldrb    w4, [x1]                ; Load current byte
-    cbz     w4, loop_end            ; If zero, skip loop
+    // Start of a loop
+    ldrb    w24, [x20]
+    cbz     w24, find_loop_end
+    b       advance
+
+find_loop_end:
+    // Find the matching ']'
+    mov     w25, #1
+
+find_loop_end_inner:
+    add     x22, x22, #1
+    ldrb    w24, [x22]
+    cbz     w24, error_handler
+    cmp     w24, #'['
+    b.eq    increment_depth
+    cmp     w24, #']'
+    b.eq    decrement_depth
+    b       find_loop_end_inner
+
+increment_depth:
+    add     w25, w25, #1
+    b       find_loop_end_inner
+
+decrement_depth:
+    sub     w25, w25, #1
+    cbz     w25, find_loop_end_done
+    b       find_loop_end_inner
+
+find_loop_end_done:
+    b       advance
 
 loop_end:
-    ; Restore registers and return
-    ldp     x4, x30, [sp], #16      ; Restore loop counter and return address
-    ret
+    // End of a loop
+    ldrb    w24, [x20]
+    cbnz    w24, find_loop_start
+    b       advance
+
+find_loop_start:
+    // Find the matching '['
+    mov     w25, #1
+
+find_loop_start_inner:
+    sub     x22, x22, #1
+    ldrb    w24, [x22]
+    cbz     w24, error_handler
+    cmp     w24, #']'
+    b.eq    increment_depth_back
+    cmp     w24, #'['
+    b.eq    decrement_depth_back
+    b       find_loop_start_inner
+
+increment_depth_back:
+    add     w25, w25, #1
+    b       find_loop_start_inner
+
+decrement_depth_back:
+    sub     w25, w25, #1
+    cbz     w25, interpret_loop
+    b       find_loop_start_inner
+
+advance:
+    // Advance to the next instruction
+    add     x22, x22, #1
+    b       interpret_loop
+
+cleanup:
+    // Cleanup and exit
+    mov     x0, x19
+    mov     x1, #0x7530
+    mov     x16, #73                  // munmap syscall
+    svc     #0x80
+
+    mov     x0, #0
+    mov     x16, #1                   // exit syscall
+    svc     #0x80
+
+error_handler:
+    // Error handler
+    mov     x0, #1
+    mov     x16, #1
+    svc     #0x80
