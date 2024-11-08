@@ -6,6 +6,10 @@ A slightly unhinged attempt at writing an interpreter for the Brainfuck language
 > This compiler is not usable in its current state because I keep getting segfaults.Consider it a work-in-progress—or 
 a lesson in hubris
 
+## Requirement
+> Apple Silicon macOS 
+> XCode Assembler
+
 ## Building
 
 1. Clone the repository: `git clone https://github.com/your-repo/brainfucker.git && cd Brainfucker`
