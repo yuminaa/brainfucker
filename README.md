@@ -12,7 +12,7 @@ a lesson in hubris
 
 ## Building
 
-1. Clone the repository: `git clone https://github.com/your-repo/brainfucker.git && cd Brainfucker`
+1. Clone the repository: `git clone https://github.com/yuminaa/brainfucker.git && cd Brainfucker`
 2. Run `make`
 
 ## Contributing
